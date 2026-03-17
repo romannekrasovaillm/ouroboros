@@ -15,6 +15,9 @@ logger = logging.getLogger(__name__)
 # Default timeout for API calls
 DEFAULT_TIMEOUT = 180.0
 
+# Default model for lightweight tasks (dedup, compaction, etc.)
+DEFAULT_LIGHT_MODEL = "google/gemini-3-pro-preview"
+
 
 class LLMClient:
     """Client for LLM APIs (OpenRouter, DeepSeek)."""
