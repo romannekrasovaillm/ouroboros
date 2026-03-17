@@ -112,6 +112,14 @@ os.environ["OUROBOROS_LLM_BASE_URL"] = DEEPSEEK_BASE_URL
 # ---------------------------------------------------------------------------
 sys.path.insert(0, str(REPO_DIR))
 
+import ouroboros.apply_patch as _ap
+# Override apply_patch install path to avoid requiring root permissions
+_local_bin = REPO_DIR / "local_data" / "bin"
+_local_bin.mkdir(parents=True, exist_ok=True)
+_ap.APPLY_PATCH_PATH = _local_bin / "apply_patch"
+# Add local bin to PATH so subprocesses can find apply_patch
+os.environ["PATH"] = str(_local_bin) + os.pathsep + os.environ.get("PATH", "")
+
 from ouroboros.apply_patch import install as install_apply_patch
 from ouroboros.llm import LLMClient, DEFAULT_LIGHT_MODEL
 install_apply_patch()
