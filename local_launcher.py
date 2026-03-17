@@ -160,13 +160,29 @@ def _patched_chat(self, messages, model, tools=None, reasoning_effort="medium",
     """
     DeepSeek-compatible chat wrapper.
     Strips OpenRouter-specific fields (reasoning, provider, cache_control).
+    Clamps max_tokens to DeepSeek limit (8192).
+    Ensures reasoning_content field for deepseek-reasoner multi-turn.
     """
     from ouroboros.llm import normalize_reasoning_effort
     client = self._get_client()
 
+    # DeepSeek max_tokens limit is 8192
+    max_tokens = min(max_tokens, 8192)
+
+    # For deepseek-reasoner: assistant messages MUST have reasoning_content field
+    # See https://api-docs.deepseek.com/guides/thinking_mode#tool-calls
+    is_reasoner = "reasoner" in model
+    clean_messages = []
+    for m in messages:
+        m_copy = dict(m)
+        if is_reasoner and m_copy.get("role") == "assistant":
+            if "reasoning_content" not in m_copy:
+                m_copy["reasoning_content"] = ""
+        clean_messages.append(m_copy)
+
     kwargs: Dict[str, Any] = {
         "model": model,
-        "messages": messages,
+        "messages": clean_messages,
         "max_tokens": max_tokens,
     }
 
@@ -183,8 +199,8 @@ def _patched_chat(self, messages, model, tools=None, reasoning_effort="medium",
     try:
         resp = client.chat.completions.create(**kwargs)
     except _openai.BadRequestError as e:
-        log.warning("DeepSeek 400 Bad Request: %s | model=%s tools=%d",
-                    e.message, model, len(tools or []))
+        log.warning("DeepSeek 400 Bad Request: %s | model=%s tools=%d max_tokens=%d",
+                    e.message, model, len(tools or []), max_tokens)
         raise
     resp_dict = resp.model_dump()
     usage = resp_dict.get("usage") or {}
