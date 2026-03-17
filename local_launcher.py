@@ -179,7 +179,13 @@ def _patched_chat(self, messages, model, tools=None, reasoning_effort="medium",
         kwargs["tools"] = clean_tools
         kwargs["tool_choice"] = tool_choice
 
-    resp = client.chat.completions.create(**kwargs)
+    import openai as _openai
+    try:
+        resp = client.chat.completions.create(**kwargs)
+    except _openai.BadRequestError as e:
+        log.warning("DeepSeek 400 Bad Request: %s | model=%s tools=%d",
+                    e.message, model, len(tools or []))
+        raise
     resp_dict = resp.model_dump()
     usage = resp_dict.get("usage") or {}
     choices = resp_dict.get("choices") or [{}]
