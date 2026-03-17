@@ -18,6 +18,10 @@ dist/
 build/
 .pytest_cache/
 .mypy_cache/
+.venv/
+
+# Local runtime data
+local_data/
 
 # OS
 .DS_Store
