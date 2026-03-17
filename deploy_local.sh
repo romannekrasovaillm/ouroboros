@@ -40,16 +40,23 @@ LOCAL_LAUNCHER="${REPO_DIR}/local_launcher.py"
 # ---------------------------------------------------------------------------
 # Parse arguments
 # ---------------------------------------------------------------------------
-MODE="full"  # full | setup | start
+MODE="full"  # full | setup | start | install-service | uninstall-service | logs
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --setup) MODE="setup"; shift ;;
-        --start) MODE="start"; shift ;;
+        --setup)             MODE="setup"; shift ;;
+        --start)             MODE="start"; shift ;;
+        --install-service)   MODE="install-service"; shift ;;
+        --uninstall-service) MODE="uninstall-service"; shift ;;
+        --logs)              MODE="logs"; shift ;;
         -h|--help)
-            echo "Usage: $0 [--setup | --start | --help]"
-            echo "  (no args)  Interactive setup + launch"
-            echo "  --setup    Create .env and directories only"
-            echo "  --start    Launch with existing .env (skip setup)"
+            echo "Usage: $0 [OPTIONS]"
+            echo ""
+            echo "  (no args)           Interactive setup + launch in foreground"
+            echo "  --setup             Create .env and directories only"
+            echo "  --start             Launch in foreground with existing .env"
+            echo "  --install-service   Install as systemd user service (auto-restart)"
+            echo "  --uninstall-service Remove systemd service"
+            echo "  --logs              Tail service logs (journalctl)"
             exit 0
             ;;
         *) fatal "Unknown argument: $1" ;;
@@ -344,10 +351,9 @@ except Exception as e:
 }
 
 # ---------------------------------------------------------------------------
-# 8) Launch the agent
+# 8) Launch the agent (foreground)
 # ---------------------------------------------------------------------------
-launch() {
-    info "Starting Ouroboros with DeepSeek backend..."
+_print_launch_banner() {
     echo ""
     echo -e "${BOLD}  Model (main):  ${OUROBOROS_MODEL:-deepseek-chat}${NC}"
     echo -e "${BOLD}  Model (code):  ${OUROBOROS_MODEL_CODE:-deepseek-chat}${NC}"
@@ -356,11 +362,100 @@ launch() {
     echo -e "${BOLD}  Budget:        \$${TOTAL_BUDGET:-10}${NC}"
     echo -e "${BOLD}  Data dir:      ${DATA_DIR}${NC}"
     echo ""
+}
+
+launch() {
+    info "Starting Ouroboros with DeepSeek backend..."
+    _print_launch_banner
 
     cd "$REPO_DIR"
     exec python "${LOCAL_LAUNCHER}" \
         --data-dir "$DATA_DIR" \
         --repo-dir "$REPO_DIR"
+}
+
+# ---------------------------------------------------------------------------
+# 9) Systemd user service management
+# ---------------------------------------------------------------------------
+SERVICE_NAME="ouroboros"
+SERVICE_DIR="${HOME}/.config/systemd/user"
+SERVICE_FILE="${SERVICE_DIR}/${SERVICE_NAME}.service"
+
+install_service() {
+    setup_venv
+    install_deps
+    create_data_dirs
+
+    [[ -f "$ENV_FILE" ]] || setup_env
+    verify_env
+
+    info "Installing systemd user service..."
+
+    mkdir -p "$SERVICE_DIR"
+
+    cat > "$SERVICE_FILE" << SVCEOF
+[Unit]
+Description=Ouroboros Self-Modifying Agent (DeepSeek backend)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=${REPO_DIR}
+ExecStart=${VENV_DIR}/bin/python ${LOCAL_LAUNCHER} --data-dir ${DATA_DIR} --repo-dir ${REPO_DIR}
+EnvironmentFile=${ENV_FILE}
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ouroboros
+
+[Install]
+WantedBy=default.target
+SVCEOF
+
+    # Enable lingering so user services run without an active login session
+    if command -v loginctl &>/dev/null; then
+        loginctl enable-linger "$(whoami)" 2>/dev/null || warn "loginctl enable-linger failed (service may stop on logout)"
+    fi
+
+    systemctl --user daemon-reload
+    systemctl --user enable "$SERVICE_NAME"
+    systemctl --user start "$SERVICE_NAME"
+
+    ok "Systemd service installed and started"
+    echo ""
+    echo -e "${CYAN}Useful commands:${NC}"
+    echo "  systemctl --user status ${SERVICE_NAME}    # check status"
+    echo "  systemctl --user restart ${SERVICE_NAME}   # restart"
+    echo "  systemctl --user stop ${SERVICE_NAME}      # stop"
+    echo "  journalctl --user -u ${SERVICE_NAME} -f    # tail logs"
+    echo "  $0 --logs                                  # shortcut for logs"
+    echo "  $0 --uninstall-service                     # remove service"
+}
+
+uninstall_service() {
+    info "Removing systemd service..."
+
+    if systemctl --user is-active "$SERVICE_NAME" &>/dev/null; then
+        systemctl --user stop "$SERVICE_NAME"
+    fi
+    systemctl --user disable "$SERVICE_NAME" 2>/dev/null || true
+    rm -f "$SERVICE_FILE"
+    systemctl --user daemon-reload
+
+    ok "Service removed"
+}
+
+tail_logs() {
+    if ! systemctl --user is-active "$SERVICE_NAME" &>/dev/null; then
+        warn "Service '${SERVICE_NAME}' is not running"
+    fi
+    exec journalctl --user -u "$SERVICE_NAME" -f --no-hostname
 }
 
 # ===========================================================================
@@ -393,5 +488,14 @@ case "$MODE" in
         verify_env
         test_deepseek_api
         launch
+        ;;
+    install-service)
+        install_service
+        ;;
+    uninstall-service)
+        uninstall_service
+        ;;
+    logs)
+        tail_logs
         ;;
 esac

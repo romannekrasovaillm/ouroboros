@@ -1,13 +1,39 @@
 """
 Apply-patch shim for Claude Code CLI.
-Writes apply_patch script to /usr/local/bin/ on import.
+Writes apply_patch script to a directory on PATH.
 
 Supports: *** Update File, *** Add File, *** Delete File, *** End of File.
 """
+import os
 import pathlib
 
 
-APPLY_PATCH_PATH = pathlib.Path("/usr/local/bin/apply_patch")
+def _choose_install_path() -> pathlib.Path:
+    """Pick a writable location for apply_patch, with graceful fallback.
+
+    Priority:
+      1. /usr/local/bin/apply_patch  (if writable — Colab, root, Docker)
+      2. ~/.local/bin/apply_patch    (user install — VPS, local dev)
+    """
+    system_path = pathlib.Path("/usr/local/bin/apply_patch")
+    try:
+        system_path.parent.mkdir(parents=True, exist_ok=True)
+        # Test writability without clobbering
+        if system_path.exists() or os.access(system_path.parent, os.W_OK):
+            return system_path
+    except OSError:
+        pass
+
+    user_path = pathlib.Path.home() / ".local" / "bin" / "apply_patch"
+    user_path.parent.mkdir(parents=True, exist_ok=True)
+    # Ensure ~/.local/bin is on PATH
+    local_bin = str(user_path.parent)
+    if local_bin not in os.environ.get("PATH", ""):
+        os.environ["PATH"] = local_bin + os.pathsep + os.environ.get("PATH", "")
+    return user_path
+
+
+APPLY_PATCH_PATH = _choose_install_path()
 APPLY_PATCH_CODE = r"""#!/usr/bin/env python3
 import os
 import sys
@@ -172,7 +198,7 @@ if __name__ == "__main__":
 
 
 def install():
-    """Install apply_patch script to /usr/local/bin/."""
+    """Install apply_patch script to a writable bin directory."""
     APPLY_PATCH_PATH.parent.mkdir(parents=True, exist_ok=True)
     APPLY_PATCH_PATH.write_text(APPLY_PATCH_CODE, encoding="utf-8")
     APPLY_PATCH_PATH.chmod(0o755)
