@@ -19,6 +19,55 @@ DEFAULT_TIMEOUT = 180.0
 DEFAULT_LIGHT_MODEL = "google/gemini-3-pro-preview"
 
 
+def add_usage(
+    usage: Dict[str, Any],
+    model: str,
+    task_id: Optional[str] = None,
+    round_num: Optional[int] = None,
+) -> None:
+    """Record LLM usage for budget tracking.
+    
+    This function is called by the loop to record token usage.
+    It writes to the events.jsonl log.
+    """
+    # Import here to avoid circular imports
+    from ouroboros.utils import get_drive_path
+    
+    event = {
+        "type": "llm_usage",
+        "timestamp": time.time(),
+        "model": model,
+        "usage": usage,
+    }
+    if task_id:
+        event["task_id"] = task_id
+    if round_num is not None:
+        event["round_num"] = round_num
+    
+    # Write to events log
+    events_path = get_drive_path("logs/events.jsonl")
+    os.makedirs(os.path.dirname(events_path), exist_ok=True)
+    with open(events_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(event) + "\n")
+    
+    logger.debug(f"Recorded usage for {model}: {usage}")
+
+
+def normalize_reasoning_effort(effort: str) -> str:
+    """Normalize reasoning effort string."""
+    effort = effort.lower().strip()
+    if effort in ("low", "medium", "high", "xhigh"):
+        return effort
+    # Default to medium
+    return "medium"
+
+
+def reasoning_rank(effort: str) -> int:
+    """Convert reasoning effort to rank (higher = more reasoning)."""
+    mapping = {"low": 1, "medium": 2, "high": 3, "xhigh": 4}
+    return mapping.get(normalize_reasoning_effort(effort), 2)
+
+
 class LLMClient:
     """Client for LLM APIs (OpenRouter, DeepSeek)."""
 
