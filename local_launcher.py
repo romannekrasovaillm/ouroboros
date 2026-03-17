@@ -294,6 +294,9 @@ os.environ["OUROBOROS_MODEL"] = str(MODEL_MAIN)
 os.environ["OUROBOROS_MODEL_CODE"] = str(MODEL_CODE)
 if MODEL_LIGHT:
     os.environ["OUROBOROS_MODEL_LIGHT"] = str(MODEL_LIGHT)
+# Override fallback list for DeepSeek API — OpenRouter models won't work here
+if not os.environ.get("OUROBOROS_MODEL_FALLBACK_LIST"):
+    os.environ["OUROBOROS_MODEL_FALLBACK_LIST"] = "deepseek-chat,deepseek-reasoner"
 os.environ["OUROBOROS_DIAG_HEARTBEAT_SEC"] = str(DIAG_HEARTBEAT_SEC)
 os.environ["OUROBOROS_DIAG_SLOW_CYCLE_SEC"] = str(DIAG_SLOW_CYCLE_SEC)
 os.environ["TELEGRAM_BOT_TOKEN"] = str(TELEGRAM_BOT_TOKEN)
