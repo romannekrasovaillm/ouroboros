@@ -269,6 +269,10 @@ def check_openrouter_ground_truth() -> Optional[Dict[str, float]]:
     """
     try:
         import urllib.request
+        # Skip when LLM is routed to a non-OpenRouter endpoint (e.g. DeepSeek)
+        base_url = os.environ.get("OUROBOROS_LLM_BASE_URL", "").strip()
+        if base_url and "openrouter.ai" not in base_url:
+            return None
         api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
         if not api_key:
             return None

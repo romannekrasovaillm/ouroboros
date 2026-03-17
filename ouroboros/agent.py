@@ -143,14 +143,16 @@ class OuroborosAgent:
         """Check for uncommitted changes and attempt auto-rescue commit & push."""
         import re
         import subprocess
-        with git_lock():
+        with git_lock(repo_dir=pathlib.Path(self.env.repo_dir)):
             try:
                 result = subprocess.run(
                     ["git", "status", "--porcelain"],
                     cwd=str(self.env.repo_dir),
                     capture_output=True, text=True, timeout=10, check=True
                 )
-                dirty_files = [l.strip() for l in result.stdout.strip().split('\n') if l.strip()]
+                # Only consider tracked-file changes (not untracked '??' entries)
+                dirty_files = [l.strip() for l in result.stdout.strip().split('\n')
+                               if l.strip() and not l.strip().startswith('??')]
                 if dirty_files:
                     # Auto-rescue: commit and push
                     auto_committed = False

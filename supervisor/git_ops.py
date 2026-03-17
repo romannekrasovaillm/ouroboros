@@ -61,9 +61,15 @@ def _get_lock_path() -> pathlib.Path:
 
 
 @contextlib.contextmanager
-def git_lock() -> Generator[None, None, None]:
-    """Acquire an exclusive file lock so only one process runs git at a time."""
-    lock_path = _get_lock_path()
+def git_lock(repo_dir: Optional[pathlib.Path] = None) -> Generator[None, None, None]:
+    """Acquire an exclusive file lock so only one process runs git at a time.
+
+    Args:
+        repo_dir: Override for REPO_DIR (needed in worker processes where
+                  the module-level REPO_DIR may not be initialised).
+    """
+    base = repo_dir or REPO_DIR
+    lock_path = base / ".git" / "ouroboros_git.lock"
     fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
