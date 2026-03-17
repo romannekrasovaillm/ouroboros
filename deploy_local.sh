@@ -273,6 +273,11 @@ OUROBOROS_MAX_ROUNDS=${max_rounds}
 OUROBOROS_SOFT_TIMEOUT_SEC=600
 OUROBOROS_HARD_TIMEOUT_SEC=1800
 
+# --- Git branches ---
+# Branch names the supervisor checks out. Default: main
+OUROBOROS_BRANCH_DEV=main
+OUROBOROS_BRANCH_STABLE=main
+
 # --- LLM client override ---
 # Forces the LLM client to use DeepSeek endpoint instead of OpenRouter
 OUROBOROS_LLM_BASE_URL=https://api.deepseek.com/v1
