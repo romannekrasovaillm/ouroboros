@@ -261,8 +261,8 @@ GITHUB_REPO=${github_repo}
 TOTAL_BUDGET=${total_budget}
 
 # --- Models (DeepSeek) ---
-# deepseek-chat     = DeepSeek-V3 (general, fast, $0.27/1M input, $1.10/1M output)
-# deepseek-reasoner = DeepSeek-R1 (reasoning, $0.55/1M input, $2.19/1M output)
+# deepseek-chat     = DeepSeek-V3 (general, fast, \$0.27/1M input, \$1.10/1M output)
+# deepseek-reasoner = DeepSeek-R1 (reasoning, \$0.55/1M input, \$2.19/1M output)
 OUROBOROS_MODEL=${model_main}
 OUROBOROS_MODEL_CODE=${model_code}
 OUROBOROS_MODEL_LIGHT=${model_light}
