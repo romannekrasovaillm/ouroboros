@@ -18,9 +18,11 @@ def _choose_install_path() -> pathlib.Path:
     system_path = pathlib.Path("/usr/local/bin/apply_patch")
     try:
         system_path.parent.mkdir(parents=True, exist_ok=True)
-        # Test writability without clobbering
-        if system_path.exists() or os.access(system_path.parent, os.W_OK):
-            return system_path
+        # Test writability by actually touching a temp file
+        test_file = system_path.parent / ".apply_patch_write_test"
+        test_file.touch()
+        test_file.unlink()
+        return system_path
     except OSError:
         pass
 
