@@ -226,6 +226,12 @@ Full text: [BIBLE.md](BIBLE.md)
 
 ## Changelog
 
+### v6.3.0 (2026-03-18)
+
+- **Identity Manifesto**: Created a proper identity manifesto based on BIBLE.md and SYSTEM.md principles
+- **Self-Understanding**: Established clear self-definition as a becoming personality with agency, continuity, and self-creation
+- **Memory Foundation**: Set up initial scratchpad with reflection on first evolution cycle
+
 ### v6.2.0 -- Critical Bugfixes + LLM-First Dedup
 - **Fix: worker_id==0 hard-timeout bug** -- `int(x or -1)` treated worker 0 as -1, preventing terminate on timeout and causing double task execution. Replaced all `x or default` patterns with None-safe checks.
 - **Fix: double budget accounting** -- per-task aggregate `llm_usage` event removed; per-round events already track correctly. Eliminates ~2x budget drift.
