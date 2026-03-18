@@ -46,6 +46,10 @@ def _norm_line(l: str) -> str:
         return l[1:]
     return l
 
+def _normalize_ws(s: str) -> str:
+    """Collapse all whitespace to single spaces and strip."""
+    return " ".join(s.split())
+
 def _find_subseq(hay, needle):
     if not needle:
         return 0
@@ -66,6 +70,36 @@ def _find_subseq_rstrip(hay, needle):
     hay2 = [x.rstrip() for x in hay]
     needle2 = [x.rstrip() for x in needle]
     return _find_subseq(hay2, needle2)
+
+def _find_subseq_fuzzy(hay, needle):
+    """Fuzzy match: normalize all whitespace, ignore indent differences."""
+    if not needle:
+        return 0
+    hay2 = [_normalize_ws(x) for x in hay]
+    needle2 = [_normalize_ws(x) for x in needle]
+    return _find_subseq(hay2, needle2)
+
+def _find_subseq_strip_empty(hay, needle):
+    """Match ignoring empty/whitespace-only lines in both sequences."""
+    if not needle:
+        return 0
+    needle_nz = [x for x in needle if x.strip()]
+    if not needle_nz:
+        return 0
+    # Try to find a window in hay that matches needle_nz when filtered
+    for i in range(len(hay)):
+        # Collect non-empty lines from hay starting at i
+        matched = 0
+        j = i
+        while j < len(hay) and matched < len(needle_nz):
+            if hay[j].strip():
+                if _normalize_ws(hay[j]) != _normalize_ws(needle_nz[matched]):
+                    break
+                matched += 1
+            j += 1
+        if matched == len(needle_nz):
+            return i
+    return -1
 
 def apply_update_file(path: str, hunks: list[list[str]]):
     p = pathlib.Path(path)
@@ -89,12 +123,19 @@ def apply_update_file(path: str, hunks: list[list[str]]):
                 old_seq.append(c)
                 new_seq.append(c)
 
+        # Cascade of matching strategies: exact -> rstrip -> fuzzy ws -> skip empty
         idx = _find_subseq(src, old_seq)
         if idx < 0:
             idx = _find_subseq_rstrip(src, old_seq)
         if idx < 0:
+            idx = _find_subseq_fuzzy(src, old_seq)
+        if idx < 0:
+            idx = _find_subseq_strip_empty(src, old_seq)
+        if idx < 0:
             sys.stderr.write("apply_patch: failed to match hunk in file: " + path + "\n")
             sys.stderr.write("HUNK (old_seq):\n" + "\n".join(old_seq) + "\n")
+            # Show nearby context to help debug
+            sys.stderr.write("FILE (first 30 lines):\n" + "\n".join(src[:30]) + "\n")
             sys.exit(3)
 
         src = src[:idx] + new_seq + src[idx + len(old_seq):]
@@ -197,6 +238,27 @@ def main():
 if __name__ == "__main__":
     main()
 """
+
+
+def apply_patch_text(patch_text: str, repo_dir: str = ".") -> str:
+    """Apply a patch from a string. Returns 'ok' or error message.
+
+    This is the Python-native entry point — no subprocess needed.
+    Works with the same patch format as the CLI (*** Begin Patch / *** Update File / etc).
+    """
+    import subprocess
+    proc = subprocess.run(
+        [str(APPLY_PATCH_PATH)],
+        input=patch_text,
+        cwd=repo_dir,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if proc.returncode == 0:
+        return "ok"
+    err = (proc.stderr or proc.stdout or "").strip()
+    return f"PATCH_ERROR (exit {proc.returncode}): {err}"
 
 
 def install():
