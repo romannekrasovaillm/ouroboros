@@ -314,6 +314,7 @@ if not os.environ.get("OUROBOROS_MODEL_FALLBACK_LIST"):
 os.environ["OUROBOROS_DIAG_HEARTBEAT_SEC"] = str(DIAG_HEARTBEAT_SEC)
 os.environ["OUROBOROS_DIAG_SLOW_CYCLE_SEC"] = str(DIAG_SLOW_CYCLE_SEC)
 os.environ["TELEGRAM_BOT_TOKEN"] = str(TELEGRAM_BOT_TOKEN)
+os.environ["OUROBOROS_REPO_DIR"] = str(REPO_DIR)
 
 # ---------------------------------------------------------------------------
 # 2) Create local data directories (replaces Google Drive mount)
