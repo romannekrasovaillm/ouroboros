@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import os
 import pathlib
@@ -132,6 +133,14 @@ def _git_push_with_tests(ctx: ToolContext) -> Optional[str]:
 
 def _repo_write_commit(ctx: ToolContext, path: str, content: str, commit_message: str) -> str:
     ctx.last_push_succeeded = False
+    # Auto-serialize dict/list content to JSON string (LLM sometimes passes structured data)
+    if isinstance(content, (dict, list)):
+        try:
+            content = json.dumps(content, ensure_ascii=False, indent=2)
+        except (TypeError, ValueError) as e:
+            return f"⚠️ CONTENT_SERIALIZATION_ERROR: content is {type(content).__name__} but cannot be serialized: {e}"
+    if not isinstance(content, str):
+        return f"⚠️ TYPE_ERROR: content must be a string, got {type(content).__name__}. Pass a string or a JSON-serializable dict/list."
     if not commit_message.strip():
         return "⚠️ ERROR: commit_message must be non-empty."
     lock = _acquire_git_lock(ctx)

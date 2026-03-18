@@ -18,6 +18,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import logging
 
+import hashlib as _hashlib
+from collections import deque as _deque
+
 from ouroboros.llm import LLMClient, normalize_reasoning_effort, add_usage
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.context import compact_tool_history, compact_tool_history_llm
@@ -42,6 +45,11 @@ _MODEL_PRICING_STATIC = {
     "google/gemini-3-pro-preview": (2.0, 0.20, 12.0),
     "x-ai/grok-3-mini": (0.30, 0.03, 0.50),
     "qwen/qwen3.5-plus-02-15": (0.40, 0.04, 2.40),
+    # DeepSeek models (direct API pricing, per 1M tokens)
+    "deepseek-chat": (0.27, 0.07, 1.10),
+    "deepseek-reasoner": (0.55, 0.14, 2.19),
+    "deepseek/deepseek-chat": (0.27, 0.07, 1.10),
+    "deepseek/deepseek-reasoner": (0.55, 0.14, 2.19),
 }
 
 _pricing_fetched = False
@@ -109,6 +117,31 @@ def _estimate_cost(model: str, prompt_tokens: int, completion_tokens: int,
         + completion_tokens * output_price / 1_000_000
     )
     return round(cost, 6)
+
+class _ReasoningDedup:
+    """Track hashes of recent assistant reasoning blocks to detect repetition."""
+    _MAX_HISTORY = 8
+
+    def __init__(self):
+        self._seen: _deque = _deque(maxlen=self._MAX_HISTORY)
+        self._consecutive_dupes = 0
+
+    def check(self, text: str) -> bool:
+        """Return True if this text is a duplicate of a recent block."""
+        if not text or len(text.strip()) < 40:
+            return False
+        h = _hashlib.sha256(text.strip().encode("utf-8")).hexdigest()[:16]
+        if h in self._seen:
+            self._consecutive_dupes += 1
+            return True
+        self._seen.append(h)
+        self._consecutive_dupes = 0
+        return False
+
+    @property
+    def consecutive_dupes(self) -> int:
+        return self._consecutive_dupes
+
 
 READ_ONLY_PARALLEL_TOOLS = frozenset({
     "repo_read", "repo_list",
@@ -445,6 +478,37 @@ def _check_budget_limits(
     return None
 
 
+SIDE_TASK_BUDGET_PCT = float(os.environ.get("OUROBOROS_SIDE_TASK_BUDGET_PCT", "30"))
+
+
+class _SideTaskBudget:
+    """Track rounds spent on error-fixing vs. productive work.
+
+    If more than SIDE_TASK_BUDGET_PCT of rounds are consecutive errors,
+    inject a defer nudge so the LLM stops chasing blocking issues.
+    """
+    def __init__(self):
+        self._consecutive_error_rounds = 0
+        self._total_rounds = 0
+
+    def record(self, had_errors: bool) -> Optional[str]:
+        self._total_rounds += 1
+        if had_errors:
+            self._consecutive_error_rounds += 1
+        else:
+            self._consecutive_error_rounds = 0
+            return None
+        # Check if we've spent too many consecutive rounds on errors
+        if self._total_rounds >= 5 and self._consecutive_error_rounds >= max(3, int(self._total_rounds * SIDE_TASK_BUDGET_PCT / 100)):
+            return (
+                f"[SIDE_TASK_BUDGET] You have spent {self._consecutive_error_rounds} consecutive rounds "
+                f"fixing errors (>{SIDE_TASK_BUDGET_PCT:.0f}% budget). "
+                "DEFER: skip this blocking issue, note it in your response, and continue with the main task. "
+                "Use schedule_task to handle the fix separately if needed."
+            )
+        return None
+
+
 def _maybe_inject_self_check(
     round_idx: int,
     max_rounds: int,
@@ -636,6 +700,10 @@ def run_llm_loop(
     stateful_executor = _StatefulToolExecutor()
     # Dedup set for per-task owner messages from Drive mailbox
     _owner_msg_seen: set = set()
+    # Reasoning dedup: detect when LLM repeats identical reasoning blocks
+    _reasoning_dedup = _ReasoningDedup()
+    # Side-task budget: limit consecutive error-fixing rounds
+    _side_budget = _SideTaskBudget()
     try:
         MAX_ROUNDS = max(1, int(os.environ.get("OUROBOROS_MAX_ROUNDS", "200")))
     except (ValueError, TypeError):
@@ -701,7 +769,7 @@ def run_llm_loop(
                 # Configurable fallback priority list (Bible P3: no hardcoded behavior)
                 fallback_list_raw = os.environ.get(
                     "OUROBOROS_MODEL_FALLBACK_LIST",
-                    "google/gemini-2.5-pro-preview,openai/o3,anthropic/claude-sonnet-4.6"
+                    "deepseek-chat,deepseek-reasoner,google/gemini-2.5-pro-preview,anthropic/claude-sonnet-4.6"
                 )
                 fallback_candidates = [m.strip() for m in fallback_list_raw.split(",") if m.strip()]
                 fallback_model = None
@@ -747,11 +815,24 @@ def run_llm_loop(
             if content and content.strip():
                 emit_progress(content.strip())
                 llm_trace["assistant_notes"].append(content.strip()[:320])
+                # Detect repeated reasoning — nudge the LLM to change approach
+                if _reasoning_dedup.check(content):
+                    dupes = _reasoning_dedup.consecutive_dupes
+                    if dupes >= 2:
+                        messages.append({"role": "system", "content":
+                            f"[DEDUP] You have repeated the same reasoning {dupes} times. "
+                            "STOP repeating. Change your approach, simplify, or finish with what you have."
+                        })
 
             error_count = _handle_tool_calls(
                 tool_calls, tools, drive_logs, task_id, stateful_executor,
                 messages, llm_trace, emit_progress
             )
+
+            # --- Side-task budget: defer if too many consecutive error rounds ---
+            side_nudge = _side_budget.record(error_count > 0)
+            if side_nudge:
+                messages.append({"role": "system", "content": side_nudge})
 
             # --- Budget guard ---
             # LLM decides when to stop (Bible P0, P3). We only enforce hard budget limit.
