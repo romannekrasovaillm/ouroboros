@@ -6,7 +6,9 @@ Clone, checkout, reset, rescue snapshots, dependency sync, import test.
 
 from __future__ import annotations
 
+import contextlib
 import datetime
+import fcntl
 import json
 import logging
 import os
@@ -15,7 +17,7 @@ import shutil
 import subprocess
 import sys
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Generator, List, Optional, Tuple
 
 from supervisor.state import (
     load_state, save_state, append_jsonl, atomic_write_text,
@@ -42,6 +44,39 @@ def init(repo_dir: pathlib.Path, drive_root: pathlib.Path, remote_url: str,
     REMOTE_URL = remote_url
     BRANCH_DEV = branch_dev
     BRANCH_STABLE = branch_stable
+
+
+# ---------------------------------------------------------------------------
+# Cross-process git lock (prevents index.lock races between workers)
+# ---------------------------------------------------------------------------
+
+_GIT_LOCK_PATH: Optional[pathlib.Path] = None
+
+
+def _get_lock_path() -> pathlib.Path:
+    global _GIT_LOCK_PATH
+    if _GIT_LOCK_PATH is None:
+        _GIT_LOCK_PATH = REPO_DIR / ".git" / "ouroboros_git.lock"
+    return _GIT_LOCK_PATH
+
+
+@contextlib.contextmanager
+def git_lock(repo_dir: Optional[pathlib.Path] = None) -> Generator[None, None, None]:
+    """Acquire an exclusive file lock so only one process runs git at a time.
+
+    Args:
+        repo_dir: Override for REPO_DIR (needed in worker processes where
+                  the module-level REPO_DIR may not be initialised).
+    """
+    base = repo_dir or REPO_DIR
+    lock_path = base / ".git" / "ouroboros_git.lock"
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +242,12 @@ def _create_rescue_snapshot(branch: str, reason: str,
 
 def checkout_and_reset(branch: str, reason: str = "unspecified",
                        unsynced_policy: str = "ignore") -> Tuple[bool, str]:
+  with git_lock():
+    return _checkout_and_reset_inner(branch, reason, unsynced_policy)
+
+
+def _checkout_and_reset_inner(branch: str, reason: str,
+                              unsynced_policy: str) -> Tuple[bool, str]:
     rc, _, err = git_capture(["git", "fetch", "origin"])
     if rc != 0:
         msg = f"git fetch failed: {err or 'unknown error'}"

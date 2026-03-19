@@ -52,10 +52,11 @@ def _drive_list(ctx: ToolContext, dir: str = ".", max_entries: int = 500) -> str
 
 
 def _drive_write(ctx: ToolContext, path: str, content: str, mode: str = "overwrite") -> str:
+    from ouroboros.utils import write_text as _atomic_write
     p = ctx.drive_path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     if mode == "overwrite":
-        p.write_text(content, encoding="utf-8")
+        _atomic_write(p, content)  # atomic: write to tmp + fsync + rename
     else:
         with p.open("a", encoding="utf-8") as f:
             f.write(content)

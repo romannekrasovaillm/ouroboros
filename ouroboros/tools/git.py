@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import json
 import logging
 import os
 import pathlib
@@ -11,44 +13,52 @@ from typing import Any, Dict, List, Optional
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.utils import utc_now_iso, write_text, safe_relpath, run_cmd
+from supervisor.git_ops import git_lock
 
 log = logging.getLogger(__name__)
 
 
-# --- Git lock ---
+# --- Git lock (delegates to cross-process fcntl lock in git_ops) ---
 
-def _acquire_git_lock(ctx: ToolContext, timeout_sec: int = 120) -> pathlib.Path:
-    lock_dir = ctx.drive_path("locks")
-    lock_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = lock_dir / "git.lock"
-    stale_sec = 600
-    deadline = time.time() + timeout_sec
-    while time.time() < deadline:
-        if lock_path.exists():
-            try:
-                age = time.time() - lock_path.stat().st_mtime
-                if age > stale_sec:
-                    lock_path.unlink()
-                    continue
-            except (FileNotFoundError, OSError):
-                pass
+@contextlib.contextmanager
+def _git_lock_ctx(ctx: ToolContext):
+    """Acquire the cross-process git lock."""
+    with git_lock():
+        yield
+
+
+def _acquire_git_lock(ctx: ToolContext, timeout_sec: int = 120) -> "_GitLockHandle":
+    """Legacy API — returns a handle whose release is a no-op (lock released via context manager)."""
+    return _GitLockHandle(ctx)
+
+
+class _GitLockHandle:
+    """Thin wrapper so callers that do acquire/release still work."""
+    def __init__(self, ctx: ToolContext):
+        import fcntl
+        lock_path = pathlib.Path(ctx.repo_dir) / ".git" / "ouroboros_git.lock"
+        self._fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+        fcntl.flock(self._fd, fcntl.LOCK_EX)
+        self.path = lock_path  # kept for compat
+
+    def release(self):
+        import fcntl
         try:
-            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-            try:
-                os.write(fd, f"locked_at={utc_now_iso()}\n".encode("utf-8"))
-            finally:
-                os.close(fd)
-            return lock_path
-        except FileExistsError:
-            time.sleep(0.5)
-    raise TimeoutError(f"Git lock not acquired within {timeout_sec}s: {lock_path}")
+            fcntl.flock(self._fd, fcntl.LOCK_UN)
+            os.close(self._fd)
+        except OSError:
+            pass
 
 
-def _release_git_lock(lock_path: pathlib.Path) -> None:
-    try:
-        lock_path.unlink()
-    except FileNotFoundError:
-        pass
+def _release_git_lock(lock_handle) -> None:
+    if hasattr(lock_handle, 'release'):
+        lock_handle.release()
+    elif isinstance(lock_handle, pathlib.Path):
+        # Old-style path-based lock — just try to unlink
+        try:
+            lock_handle.unlink()
+        except FileNotFoundError:
+            pass
 
 
 # --- Pre-push test gate ---
@@ -123,6 +133,14 @@ def _git_push_with_tests(ctx: ToolContext) -> Optional[str]:
 
 def _repo_write_commit(ctx: ToolContext, path: str, content: str, commit_message: str) -> str:
     ctx.last_push_succeeded = False
+    # Auto-serialize dict/list content to JSON string (LLM sometimes passes structured data)
+    if isinstance(content, (dict, list)):
+        try:
+            content = json.dumps(content, ensure_ascii=False, indent=2)
+        except (TypeError, ValueError) as e:
+            return f"⚠️ CONTENT_SERIALIZATION_ERROR: content is {type(content).__name__} but cannot be serialized: {e}"
+    if not isinstance(content, str):
+        return f"⚠️ TYPE_ERROR: content must be a string, got {type(content).__name__}. Pass a string or a JSON-serializable dict/list."
     if not commit_message.strip():
         return "⚠️ ERROR: commit_message must be non-empty."
     lock = _acquire_git_lock(ctx)

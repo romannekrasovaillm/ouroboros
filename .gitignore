@@ -20,7 +20,7 @@ build/
 .mypy_cache/
 .venv/
 
-# Data
+# Local runtime data
 local_data/
 
 # OS

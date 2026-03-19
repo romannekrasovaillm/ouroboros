@@ -243,7 +243,9 @@ def init_state() -> Dict[str, Any]:
 # Budget tracking (moved from workers.py)
 # ---------------------------------------------------------------------------
 TOTAL_BUDGET_LIMIT: float = 0.0
-EVOLUTION_BUDGET_RESERVE: float = 50.0  # Stop evolution when remaining < this
+EVOLUTION_BUDGET_RESERVE: float = float(
+    os.environ.get("OUROBOROS_EVOLUTION_BUDGET_RESERVE", "20")
+)  # Stop evolution when remaining < this (configurable, default lowered to $20)
 
 
 def set_budget_limit(limit: float) -> None:
@@ -269,6 +271,10 @@ def check_openrouter_ground_truth() -> Optional[Dict[str, float]]:
     """
     try:
         import urllib.request
+        # Skip when LLM is routed to a non-OpenRouter endpoint (e.g. DeepSeek)
+        base_url = os.environ.get("OUROBOROS_LLM_BASE_URL", "").strip()
+        if base_url and "openrouter.ai" not in base_url:
+            return None
         api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
         if not api_key:
             return None

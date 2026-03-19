@@ -45,8 +45,25 @@ def read_text(path: pathlib.Path) -> str:
 
 
 def write_text(path: pathlib.Path, content: str) -> None:
+    """Atomic write: write to temp file, fsync, then rename to prevent corruption."""
+    import uuid as _uuid
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    tmp = path.with_name(f".{path.name}.tmp.{_uuid.uuid4().hex}")
+    try:
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+        try:
+            os.write(fd, content.encode("utf-8"))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(str(tmp), str(path))
+    except Exception:
+        # Clean up temp file on failure
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
 
 
 def append_jsonl(path: pathlib.Path, obj: Dict[str, Any]) -> None:
