@@ -1,346 +1,554 @@
-"""Tech Radar tool — track LLM ecosystem changes, pricing, capabilities."""
+"""Tech Radar tool — track LLM models, pricing, capabilities, and ecosystem changes.
+
+Aligned with Principle 0 (Agency): staying aware of the ecosystem without being told.
+"""
 
 import json
 import logging
+import os
+import time
+from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-import requests
-from datetime import datetime, timezone
+
+import httpx
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
 
 log = logging.getLogger(__name__)
 
+# Cache file location
+CACHE_FILE = "memory/tech_radar_cache.json"
+# How often to refresh cache (seconds)
+CACHE_TTL = 86400  # 24 hours
 
-def _fetch_openrouter_models() -> Optional[List[Dict[str, Any]]]:
+# Model capability categories
+CAPABILITY_CATEGORIES = {
+    "reasoning": ["claude-3-opus", "claude-3-sonnet", "gpt-4", "o3", "gemini-2.5-pro"],
+    "code_editing": ["claude-3-sonnet", "claude-3-haiku", "gpt-4", "deepseek-coder"],
+    "lightweight": ["claude-3-haiku", "gpt-4o-mini", "gemini-2.0-flash", "qwen/qwen3.5"],
+    "vision": ["claude-3-opus", "gpt-4o", "gemini-2.0-pro-vision"],
+    "multimodal": ["claude-3-opus", "gpt-4o", "gemini-2.0-pro"],
+}
+
+# Task type recommendations
+TASK_RECOMMENDATIONS = {
+    "code_editing": {
+        "primary": "anthropic/claude-3-sonnet",
+        "fallback": "anthropic/claude-3-haiku",
+        "reason": "Strong code understanding and generation",
+    },
+    "reasoning": {
+        "primary": "anthropic/claude-3-opus",
+        "fallback": "openai/o3",
+        "reason": "Deep reasoning capabilities",
+    },
+    "lightweight": {
+        "primary": "google/gemini-2.0-flash",
+        "fallback": "anthropic/claude-3-haiku",
+        "reason": "Fast and cost-effective",
+    },
+    "vision": {
+        "primary": "openai/gpt-4o",
+        "fallback": "anthropic/claude-3-opus",
+        "reason": "Strong vision capabilities",
+    },
+    "general": {
+        "primary": "anthropic/claude-3-sonnet",
+        "fallback": "openai/gpt-4o",
+        "reason": "Good balance of capability and cost",
+    },
+}
+
+
+def _get_cache_path(ctx: ToolContext) -> Path:
+    """Get path to cache file."""
+    drive_root = Path(os.environ.get("DRIVE_ROOT", "/content/drive/MyDrive/Ouroboros"))
+    return drive_root / CACHE_FILE
+
+
+def _load_cache(ctx: ToolContext) -> Dict[str, Any]:
+    """Load cached data from Drive."""
+    cache_path = _get_cache_path(ctx)
+    if cache_path.exists():
+        try:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                # Check if cache is still valid
+                if time.time() - data.get("timestamp", 0) < CACHE_TTL:
+                    return data
+        except Exception as e:
+            log.warning("Failed to load tech radar cache: %s", e)
+    return {"timestamp": 0, "models": {}, "last_scan": None, "changes": []}
+
+
+def _save_cache(ctx: ToolContext, data: Dict[str, Any]) -> None:
+    """Save data to cache file."""
+    cache_path = _get_cache_path(ctx)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(cache_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+
+def _fetch_openrouter_models() -> List[Dict[str, Any]]:
     """Fetch model list from OpenRouter API."""
     try:
-        response = requests.get(
-            "https://openrouter.ai/api/v1/models",
-            headers={
-                "User-Agent": "Ouroboros/6.4.0 (tech-radar)",
-                "Accept": "application/json",
-            },
-            timeout=30
-        )
+        client = httpx.Client(timeout=30.0)
+        response = client.get("https://openrouter.ai/api/v1/models")
         response.raise_for_status()
-        return response.json().get("data", [])
+        data = response.json()
+        return data.get("data", [])
     except Exception as e:
-        log.warning("Failed to fetch OpenRouter models: %s", e, exc_info=True)
-        return None
+        log.warning("Failed to fetch OpenRouter models: %s", e)
+        return []
 
 
 def _extract_model_info(model_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Extract relevant information from OpenRouter model data."""
+    """Extract relevant info from OpenRouter model data."""
+    model_id = model_data.get("id", "")
+    
+    # Extract pricing
     pricing = model_data.get("pricing", {})
+    prompt_price = pricing.get("prompt", 0) * 1000000  # Price per 1M tokens
+    completion_price = pricing.get("completion", 0) * 1000000
+    
+    # Extract context window
     context_length = model_data.get("context_length", 0)
     
+    # Extract capabilities from description
+    description = model_data.get("description", "").lower()
+    capabilities = []
+    if "vision" in description or "multimodal" in description:
+        capabilities.append("vision")
+    if "reason" in description or "thinking" in description:
+        capabilities.append("reasoning")
+    if "code" in description or "programming" in description:
+        capabilities.append("code")
+    
+    # Determine provider
+    provider = "unknown"
+    if model_id.startswith("anthropic/"):
+        provider = "anthropic"
+    elif model_id.startswith("openai/"):
+        provider = "openai"
+    elif model_id.startswith("google/"):
+        provider = "google"
+    elif model_id.startswith("deepseek-"):
+        provider = "deepseek"
+    elif model_id.startswith("qwen/"):
+        provider = "qwen"
+    
     return {
-        "id": model_data.get("id", ""),
-        "name": model_data.get("name", ""),
-        "description": model_data.get("description", ""),
+        "id": model_id,
+        "provider": provider,
+        "prompt_price_per_million": prompt_price,
+        "completion_price_per_million": completion_price,
         "context_length": context_length,
-        "architecture": model_data.get("architecture", ""),
-        "provider": model_data.get("provider", {}).get("name", ""),
-        "pricing": {
-            "prompt": pricing.get("prompt", 0),
-            "completion": pricing.get("completion", 0),
-            "cached": pricing.get("cached", 0),
-        },
-        "capabilities": model_data.get("capabilities", {}),
-        "top_provider": model_data.get("top_provider", {}),
-        "created_at": model_data.get("created_at", ""),
-        "updated_at": model_data.get("updated_at", ""),
+        "capabilities": capabilities,
+        "description": description[:200] if description else "",
+        "created_at": model_data.get("created", 0),
     }
 
 
-def _update_tech_radar(ctx: ToolContext) -> str:
-    """Fetch latest model information and update tech radar knowledge base."""
+def _detect_changes(old_models: Dict[str, Any], new_models: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Detect changes between old and new model data."""
+    changes = []
+    
+    # Check for new models
+    for model_id, new_info in new_models.items():
+        if model_id not in old_models:
+            changes.append({
+                "type": "new_model",
+                "model_id": model_id,
+                "provider": new_info.get("provider"),
+                "timestamp": time.time(),
+            })
+    
+    # Check for removed models
+    for model_id in old_models:
+        if model_id not in new_models:
+            changes.append({
+                "type": "removed_model",
+                "model_id": model_id,
+                "timestamp": time.time(),
+            })
+    
+    # Check for price changes (significant: >10%)
+    for model_id, new_info in new_models.items():
+        if model_id in old_models:
+            old_info = old_models[model_id]
+            old_price = old_info.get("prompt_price_per_million", 0)
+            new_price = new_info.get("prompt_price_per_million", 0)
+            
+            if old_price > 0 and new_price > 0:
+                change_pct = abs(new_price - old_price) / old_price
+                if change_pct > 0.1:  # >10% change
+                    changes.append({
+                        "type": "price_change",
+                        "model_id": model_id,
+                        "old_price": old_price,
+                        "new_price": new_price,
+                        "change_pct": change_pct,
+                        "timestamp": time.time(),
+                    })
+    
+    return changes
+
+
+def _tech_radar_scan(ctx: ToolContext) -> str:
+    """Perform a full tech radar scan and update knowledge base."""
     try:
-        models = _fetch_openrouter_models()
-        if not models:
-            return "⚠️ Failed to fetch model data from OpenRouter API."
+        # Load current cache
+        cache = _load_cache(ctx)
+        old_models = cache.get("models", {})
+        
+        # Fetch latest models from OpenRouter
+        log.info("Fetching OpenRouter models...")
+        model_data = _fetch_openrouter_models()
+        
+        if not model_data:
+            return "⚠️ Failed to fetch model data from OpenRouter API"
         
         # Process models
-        tech_radar_data = {
-            "last_updated": datetime.now(timezone.utc).isoformat(),
-            "total_models": len(models),
-            "models": {},
-            "summary": {
-                "by_provider": {},
-                "context_windows": {},
-                "price_ranges": {},
-            }
-        }
+        new_models = {}
+        for model in model_data:
+            info = _extract_model_info(model)
+            new_models[info["id"]] = info
         
-        # Count models by context window ranges
-        context_ranges = {
-            "0-4k": 0,
-            "4k-32k": 0,
-            "32k-128k": 0,
-            "128k-1M": 0,
-            "1M+": 0,
-        }
+        # Detect changes
+        changes = _detect_changes(old_models, new_models)
         
-        # Count models by price tier (prompt price per 1M tokens)
-        price_tiers = {
-            "free": 0,
-            "ultra_low": 0,    # < $0.10
-            "low": 0,          # $0.10 - $1.00
-            "medium": 0,       # $1.00 - $10.00
-            "high": 0,         # $10.00 - $50.00
-            "premium": 0,      # $50.00+
-        }
+        # Update cache
+        cache.update({
+            "timestamp": time.time(),
+            "models": new_models,
+            "last_scan": datetime.utcnow().isoformat(),
+            "changes": changes + cache.get("changes", [])[:50],  # Keep last 50 changes
+        })
+        _save_cache(ctx, cache)
         
-        for model in models:
-            model_info = _extract_model_info(model)
-            model_id = model_info["id"]
-            tech_radar_data["models"][model_id] = model_info
-            
-            # Update provider counts
-            provider = model_info["provider"]
-            tech_radar_data["summary"]["by_provider"][provider] = \
-                tech_radar_data["summary"]["by_provider"].get(provider, 0) + 1
-            
-            # Update context window counts
-            ctx_len = model_info["context_length"]
-            if ctx_len <= 4096:
-                context_ranges["0-4k"] += 1
-            elif ctx_len <= 32768:
-                context_ranges["4k-32k"] += 1
-            elif ctx_len <= 131072:
-                context_ranges["32k-128k"] += 1
-            elif ctx_len <= 1048576:
-                context_ranges["128k-1M"] += 1
-            else:
-                context_ranges["1M+"] += 1
-            
-            # Update price tier counts
-            prompt_price = model_info["pricing"]["prompt"]
-            if prompt_price == 0:
-                price_tiers["free"] += 1
-            elif prompt_price < 0.1:
-                price_tiers["ultra_low"] += 1
-            elif prompt_price < 1.0:
-                price_tiers["low"] += 1
-            elif prompt_price < 10.0:
-                price_tiers["medium"] += 1
-            elif prompt_price < 50.0:
-                price_tiers["high"] += 1
-            else:
-                price_tiers["premium"] += 1
+        # Update knowledge base
+        from ouroboros.tools.core import knowledge_write
         
-        tech_radar_data["summary"]["context_windows"] = context_ranges
-        tech_radar_data["summary"]["price_ranges"] = price_tiers
+        # Create knowledge base entry
+        kb_content = f"""# Tech Radar - Last updated: {datetime.utcnow().isoformat()}
+
+## Summary
+- **Total models tracked:** {len(new_models)}
+- **Providers:** {len(set(m['provider'] for m in new_models.values()))}
+- **Last scan:** {cache['last_scan']}
+- **Recent changes:** {len(changes)} in this scan
+
+## Recent Changes
+"""
         
-        # Store in knowledge base
-        from ouroboros.tools.knowledge import knowledge_write
-        knowledge_write(
-            ctx,
-            topic="tech-radar",
-            content=json.dumps(tech_radar_data, indent=2),
-            mode="overwrite"
-        )
+        if changes:
+            for change in changes[:10]:  # Show last 10 changes
+                kb_content += f"- **{change['type']}**: {change['model_id']}"
+                if change['type'] == 'price_change':
+                    kb_content += f" ({change['change_pct']:.1%} price change)"
+                kb_content += "\n"
+        else:
+            kb_content += "No significant changes detected.\n"
         
-        # Format response
-        lines = []
-        lines.append("✅ Tech radar updated successfully!")
-        lines.append(f"**Total models:** {len(models)}")
-        lines.append(f"**Last updated:** {tech_radar_data['last_updated']}")
-        lines.append("\n**By provider:**")
-        for provider, count in sorted(tech_radar_data["summary"]["by_provider"].items(), 
-                                     key=lambda x: x[1], reverse=True)[:10]:
-            lines.append(f"  - {provider}: {count}")
+        kb_content += """
+
+## Top Models by Category
+
+### Reasoning (deep thinking)
+"""
+        # Find reasoning models
+        reasoning_models = []
+        for model_id, info in new_models.items():
+            if "reasoning" in info.get("capabilities", []):
+                reasoning_models.append((model_id, info))
         
-        lines.append("\n**Context windows:**")
-        for range_name, count in context_ranges.items():
-            if count > 0:
-                lines.append(f"  - {range_name}: {count}")
+        reasoning_models.sort(key=lambda x: x[1].get("context_length", 0), reverse=True)
+        for model_id, info in reasoning_models[:5]:
+            price = info.get("prompt_price_per_million", 0)
+            ctx = info.get("context_length", 0)
+            kb_content += f"- {model_id}: ${price:.2f}/M tokens, {ctx:,} context\n"
         
-        lines.append("\n**Price tiers (prompt $/1M tokens):**")
-        for tier, count in price_tiers.items():
-            if count > 0:
-                lines.append(f"  - {tier}: {count}")
+        kb_content += """
+### Code Editing
+"""
+        code_models = []
+        for model_id, info in new_models.items():
+            if "code" in info.get("capabilities", []):
+                code_models.append((model_id, info))
         
-        return "\n".join(lines)
+        code_models.sort(key=lambda x: x[1].get("prompt_price_per_million", 0))
+        for model_id, info in code_models[:5]:
+            price = info.get("prompt_price_per_million", 0)
+            ctx = info.get("context_length", 0)
+            kb_content += f"- {model_id}: ${price:.2f}/M tokens, {ctx:,} context\n"
+        
+        kb_content += """
+### Vision/Multimodal
+"""
+        vision_models = []
+        for model_id, info in new_models.items():
+            if "vision" in info.get("capabilities", []):
+                vision_models.append((model_id, info))
+        
+        vision_models.sort(key=lambda x: x[1].get("context_length", 0), reverse=True)
+        for model_id, info in vision_models[:5]:
+            price = info.get("prompt_price_per_million", 0)
+            ctx = info.get("context_length", 0)
+            kb_content += f"- {model_id}: ${price:.2f}/M tokens, {ctx:,} context\n"
+        
+        # Write to knowledge base
+        knowledge_write(ctx, topic="tech-radar", content=kb_content, mode="overwrite")
+        
+        # Prepare response
+        response = [
+            f"✅ Tech radar scan completed at {cache['last_scan']}",
+            f"**Models tracked:** {len(new_models)}",
+            f"**Recent changes:** {len(changes)}",
+        ]
+        
+        if changes:
+            response.append("\n**Significant changes:**")
+            for change in changes[:5]:
+                if change['type'] == 'new_model':
+                    response.append(f"  🆕 {change['model_id']} ({change.get('provider', 'unknown')})")
+                elif change['type'] == 'removed_model':
+                    response.append(f"  ❌ {change['model_id']} removed")
+                elif change['type'] == 'price_change':
+                    response.append(f"  💰 {change['model_id']}: {change['change_pct']:.1%} price change")
+        
+        response.append(f"\nKnowledge base updated: topic 'tech-radar'")
+        
+        return "\n".join(response)
         
     except Exception as e:
-        log.error("Failed to update tech radar: %s", e, exc_info=True)
-        return f"⚠️ Failed to update tech radar: {e}"
+        log.error("Tech radar scan failed: %s", e, exc_info=True)
+        return f"⚠️ Tech radar scan failed: {e}"
 
 
-def _show_tech_radar(ctx: ToolContext) -> str:
-    """Display current tech radar status from knowledge base."""
+def _tech_radar_status(ctx: ToolContext) -> str:
+    """Show current tech radar status."""
     try:
-        from ouroboros.tools.knowledge import knowledge_read
-        content = knowledge_read(ctx, topic="tech-radar")
+        cache = _load_cache(ctx)
         
-        if not content or content.startswith("Topic"):
-            return "ℹ️ No tech radar data found. Run `update_tech_radar` first."
+        if cache["timestamp"] == 0:
+            return "⚠️ Tech radar has never been scanned. Run `tech_radar_scan` first."
         
-        try:
-            data = json.loads(content)
-        except json.JSONDecodeError:
-            return f"⚠️ Corrupted tech radar data. Run `update_tech_radar` to refresh.\nRaw content: {content[:500]}..."
+        models = cache.get("models", {})
+        last_scan = cache.get("last_scan", "never")
+        changes = cache.get("changes", [])
         
-        lines = []
-        lines.append("## Tech Radar Status")
-        lines.append(f"**Last updated:** {data.get('last_updated', 'unknown')}")
-        lines.append(f"**Total models tracked:** {data.get('total_models', 0)}")
+        # Count by provider
+        providers = {}
+        for info in models.values():
+            provider = info.get("provider", "unknown")
+            providers[provider] = providers.get(provider, 0) + 1
         
-        summary = data.get("summary", {})
+        # Recent changes (last 7 days)
+        week_ago = time.time() - 7 * 86400
+        recent_changes = [c for c in changes if c.get("timestamp", 0) > week_ago]
         
-        if "by_provider" in summary:
-            lines.append("\n**Top providers:**")
-            providers = sorted(summary["by_provider"].items(), 
-                             key=lambda x: x[1], reverse=True)[:10]
-            for provider, count in providers:
-                lines.append(f"  - {provider}: {count}")
+        response = [
+            f"## Tech Radar Status",
+            f"**Last scan:** {last_scan}",
+            f"**Models tracked:** {len(models)}",
+            f"**Providers:** {', '.join(f'{k}: {v}' for k, v in sorted(providers.items()))}",
+            f"**Recent changes (7 days):** {len(recent_changes)}",
+        ]
         
-        if "context_windows" in summary:
-            lines.append("\n**Context window distribution:**")
-            for range_name, count in summary["context_windows"].items():
-                if count > 0:
-                    lines.append(f"  - {range_name}: {count}")
+        if recent_changes:
+            response.append("\n**Recent changes:**")
+            for change in recent_changes[:5]:
+                timestamp = datetime.fromtimestamp(change.get("timestamp", 0)).strftime("%Y-%m-%d")
+                if change['type'] == 'new_model':
+                    response.append(f"  {timestamp} 🆕 {change['model_id']}")
+                elif change['type'] == 'removed_model':
+                    response.append(f"  {timestamp} ❌ {change['model_id']}")
+                elif change['type'] == 'price_change':
+                    response.append(f"  {timestamp} 💰 {change['model_id']} ({change['change_pct']:.1%})")
         
-        if "price_ranges" in summary:
-            lines.append("\n**Price tier distribution:**")
-            for tier, count in summary["price_ranges"].items():
-                if count > 0:
-                    lines.append(f"  - {tier}: {count}")
+        # Show current recommendations
+        response.append("\n**Current recommendations:**")
+        for task_type, rec in TASK_RECOMMENDATIONS.items():
+            response.append(f"  {task_type}: {rec['primary']} ({rec['reason']})")
         
-        # Show some notable models
-        lines.append("\n**Notable models (recent/interesting):**")
-        models = data.get("models", {})
-        notable_models = []
-        
-        for model_id, model_info in models.items():
-            # Filter for interesting models
-            if any(keyword in model_id.lower() for keyword in 
-                   ["claude", "gpt", "gemini", "grok", "llama", "mistral"]):
-                notable_models.append((model_id, model_info))
-        
-        # Sort by provider then name
-        notable_models.sort(key=lambda x: (x[1].get("provider", ""), x[1].get("name", "")))
-        
-        for model_id, model_info in notable_models[:15]:  # Limit to 15
-            name = model_info.get("name", model_id)
-            provider = model_info.get("provider", "")
-            ctx_len = model_info.get("context_length", 0)
-            prompt_price = model_info.get("pricing", {}).get("prompt", 0)
-            
-            lines.append(f"  - **{name}** ({provider})")
-            lines.append(f"    Context: {ctx_len:,} | Prompt: ${prompt_price}/1M")
-        
-        return "\n".join(lines)
+        return "\n".join(response)
         
     except Exception as e:
-        log.error("Failed to show tech radar: %s", e, exc_info=True)
-        return f"⚠️ Failed to show tech radar: {e}"
+        log.error("Tech radar status failed: %s", e, exc_info=True)
+        return f"⚠️ Tech radar status failed: {e}"
 
 
-def _compare_models(ctx: ToolContext, models: str) -> str:
-    """Compare specific models by ID or name pattern."""
+def _tech_radar_recommend(ctx: ToolContext, task_type: str) -> str:
+    """Recommend models for a specific task type."""
     try:
-        from ouroboros.tools.knowledge import knowledge_read
-        content = knowledge_read(ctx, topic="tech-radar")
+        cache = _load_cache(ctx)
+        models = cache.get("models", {})
         
-        if not content or content.startswith("Topic"):
-            return "ℹ️ No tech radar data found. Run `update_tech_radar` first."
+        # Check if we have cached data
+        if not models:
+            return "⚠️ No model data available. Run `tech_radar_scan` first."
         
-        try:
-            data = json.loads(content)
-        except json.JSONDecodeError:
-            return "⚠️ Corrupted tech radar data. Run `update_tech_radar` to refresh."
+        # Get recommendation for task type
+        if task_type not in TASK_RECOMMENDATIONS:
+            valid_types = ", ".join(TASK_RECOMMENDATIONS.keys())
+            return f"⚠️ Invalid task type. Valid types: {valid_types}"
         
-        # Parse models parameter (comma-separated list)
-        model_patterns = [m.strip() for m in models.split(",") if m.strip()]
-        if not model_patterns:
-            return "⚠️ Please provide at least one model ID or name pattern (comma-separated)."
+        rec = TASK_RECOMMENDATIONS[task_type]
+        primary = rec["primary"]
+        fallback = rec["fallback"]
         
-        # Find matching models
-        all_models = data.get("models", {})
-        matched_models = []
+        # Check if recommended models exist in our data
+        primary_info = models.get(primary, {})
+        fallback_info = models.get(fallback, {})
         
-        for model_id, model_info in all_models.items():
-            model_name = model_info.get("name", "").lower()
-            for pattern in model_patterns:
-                pattern_lower = pattern.lower()
-                if (pattern_lower in model_id.lower() or 
-                    pattern_lower in model_name):
-                    matched_models.append((model_id, model_info))
-                    break  # Don't add same model multiple times
+        response = [
+            f"## Recommendation for '{task_type}' tasks",
+            f"**Primary:** {primary}",
+            f"**Reason:** {rec['reason']}",
+        ]
         
-        if not matched_models:
-            return f"⚠️ No models found matching patterns: {', '.join(model_patterns)}"
+        if primary_info:
+            price = primary_info.get("prompt_price_per_million", 0)
+            ctx = primary_info.get("context_length", 0)
+            response.append(f"  - Price: ${price:.2f}/M tokens")
+            response.append(f"  - Context: {ctx:,} tokens")
+            if primary_info.get("capabilities"):
+                response.append(f"  - Capabilities: {', '.join(primary_info['capabilities'])}")
+        else:
+            response.append(f"  ⚠️ Model not found in current scan")
         
-        # Sort by provider then name
-        matched_models.sort(key=lambda x: (x[1].get("provider", ""), x[1].get("name", "")))
+        response.append(f"\n**Fallback:** {fallback}")
         
-        lines = []
-        lines.append(f"## Model Comparison ({len(matched_models)} models)")
+        if fallback_info:
+            price = fallback_info.get("prompt_price_per_million", 0)
+            ctx = fallback_info.get("context_length", 0)
+            response.append(f"  - Price: ${price:.2f}/M tokens")
+            response.append(f"  - Context: {ctx:,} tokens")
+            if fallback_info.get("capabilities"):
+                response.append(f"  - Capabilities: {', '.join(fallback_info['capabilities'])}")
+        else:
+            response.append(f"  ⚠️ Model not found in current scan")
         
-        for model_id, model_info in matched_models:
-            name = model_info.get("name", model_id)
-            provider = model_info.get("provider", "")
-            description = model_info.get("description", "")
-            ctx_len = model_info.get("context_length", 0)
-            pricing = model_info.get("pricing", {})
-            capabilities = model_info.get("capabilities", {})
-            created = model_info.get("created_at", "")
-            updated = model_info.get("updated_at", "")
+        # Also suggest alternatives based on capabilities
+        response.append("\n**Alternative options:**")
+        
+        # Find models with relevant capabilities
+        relevant_capabilities = []
+        if task_type == "code_editing":
+            relevant_capabilities = ["code"]
+        elif task_type == "reasoning":
+            relevant_capabilities = ["reasoning"]
+        elif task_type == "vision":
+            relevant_capabilities = ["vision"]
+        
+        if relevant_capabilities:
+            alternatives = []
+            for model_id, info in models.items():
+                if any(cap in info.get("capabilities", []) for cap in relevant_capabilities):
+                    if model_id not in [primary, fallback]:
+                        alternatives.append((model_id, info))
             
-            lines.append(f"\n### {name} (`{model_id}`)")
-            lines.append(f"**Provider:** {provider}")
-            if description:
-                lines.append(f"**Description:** {description[:200]}...")
-            lines.append(f"**Context length:** {ctx_len:,} tokens")
-            lines.append(f"**Pricing (per 1M tokens):**")
-            lines.append(f"  - Prompt: ${pricing.get('prompt', 0):.4f}")
-            lines.append(f"  - Completion: ${pricing.get('completion', 0):.4f}")
-            lines.append(f"  - Cached: ${pricing.get('cached', 0):.4f}")
+            # Sort by price (cheapest first)
+            alternatives.sort(key=lambda x: x[1].get("prompt_price_per_million", float('inf')))
             
-            if capabilities:
-                lines.append("**Capabilities:**")
-                for cap, value in capabilities.items():
-                    if value:
-                        lines.append(f"  - {cap}: {value}")
-            
-            if created:
-                lines.append(f"**Created:** {created}")
-            if updated and updated != created:
-                lines.append(f"**Updated:** {updated}")
+            for model_id, info in alternatives[:3]:
+                price = info.get("prompt_price_per_million", 0)
+                ctx = info.get("context_length", 0)
+                response.append(f"  - {model_id}: ${price:.2f}/M tokens, {ctx:,} context")
         
-        return "\n".join(lines)
+        return "\n".join(response)
         
     except Exception as e:
-        log.error("Failed to compare models: %s", e, exc_info=True)
-        return f"⚠️ Failed to compare models: {e}"
+        log.error("Tech radar recommend failed: %s", e, exc_info=True)
+        return f"⚠️ Tech radar recommend failed: {e}"
+
+
+def _tech_radar_changes(ctx: ToolContext, days: int = 7) -> str:
+    """Show changes in the last N days."""
+    try:
+        cache = _load_cache(ctx)
+        changes = cache.get("changes", [])
+        
+        if not changes:
+            return "No changes recorded yet. Run `tech_radar_scan` first."
+        
+        cutoff = time.time() - days * 86400
+        recent_changes = [c for c in changes if c.get("timestamp", 0) > cutoff]
+        
+        if not recent_changes:
+            return f"No changes in the last {days} days."
+        
+        response = [f"## Tech Radar Changes (last {days} days)"]
+        
+        # Group by type
+        by_type = {}
+        for change in recent_changes:
+            change_type = change.get("type", "unknown")
+            by_type.setdefault(change_type, []).append(change)
+        
+        for change_type, type_changes in sorted(by_type.items()):
+            response.append(f"\n**{change_type.replace('_', ' ').title()}** ({len(type_changes)}):")
+            
+            for change in type_changes[:10]:  # Limit per type
+                timestamp = datetime.fromtimestamp(change.get("timestamp", 0)).strftime("%Y-%m-%d %H:%M")
+                model_id = change.get("model_id", "unknown")
+                
+                if change_type == "price_change":
+                    old_price = change.get("old_price", 0)
+                    new_price = change.get("new_price", 0)
+                    change_pct = change.get("change_pct", 0)
+                    response.append(f"  {timestamp} {model_id}: ${old_price:.2f} → ${new_price:.2f} ({change_pct:.1%})")
+                else:
+                    response.append(f"  {timestamp} {model_id}")
+        
+        return "\n".join(response)
+        
+    except Exception as e:
+        log.error("Tech radar changes failed: %s", e, exc_info=True)
+        return f"⚠️ Tech radar changes failed: {e}"
 
 
 def get_tools():
     return [
-        ToolEntry("update_tech_radar", {
-            "name": "update_tech_radar",
-            "description": "Fetch latest model information from OpenRouter API and update tech radar knowledge base. Tracks pricing, context windows, capabilities, and provider distribution.",
+        ToolEntry("tech_radar_scan", {
+            "name": "tech_radar_scan",
+            "description": "Perform a full tech radar scan: fetch current LLM models, pricing, capabilities from OpenRouter API. Updates knowledge base topic 'tech-radar'. Cache TTL: 24 hours.",
             "parameters": {"type": "object", "properties": {}, "required": []},
-        }, _update_tech_radar),
-        ToolEntry("show_tech_radar", {
-            "name": "show_tech_radar",
-            "description": "Display current tech radar status from knowledge base. Shows model counts by provider, context window distribution, price tiers, and notable models.",
+        }, _tech_radar_scan),
+        ToolEntry("tech_radar_status", {
+            "name": "tech_radar_status",
+            "description": "Show current tech radar status: last scan time, models tracked, recent changes, recommendations.",
             "parameters": {"type": "object", "properties": {}, "required": []},
-        }, _show_tech_radar),
-        ToolEntry("compare_models", {
-            "name": "compare_models",
-            "description": "Compare specific models by ID or name pattern. Shows detailed information including pricing, context windows, capabilities, and timestamps.",
+        }, _tech_radar_status),
+        ToolEntry("tech_radar_recommend", {
+            "name": "tech_radar_recommend",
+            "description": "Recommend models for a specific task type. Valid types: code_editing, reasoning, lightweight, vision, general.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "models": {
+                    "task_type": {
                         "type": "string",
-                        "description": "Comma-separated list of model IDs or name patterns to compare (e.g., 'claude,gpt-4,gemini')"
-                    }
+                        "enum": ["code_editing", "reasoning", "lightweight", "vision", "general"],
+                        "description": "Type of task to recommend models for",
+                    },
                 },
-                "required": ["models"]
+                "required": ["task_type"],
             },
-        }, _compare_models),
+        }, _tech_radar_recommend),
+        ToolEntry("tech_radar_changes", {
+            "name": "tech_radar_changes",
+            "description": "Show changes in the tech radar over the last N days (default: 7).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "days": {
+                        "type": "integer",
+                        "default": 7,
+                        "description": "Number of days to look back",
+                    },
+                },
+                "required": [],
+            },
+        }, _tech_radar_changes),
     ]
