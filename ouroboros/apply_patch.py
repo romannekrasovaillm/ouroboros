@@ -12,8 +12,8 @@ def _choose_install_path() -> pathlib.Path:
     """Pick a writable location for apply_patch, with graceful fallback.
 
     Priority:
-      1. /usr/local/bin/apply_patch  (if writable — Colab, root, Docker)
-      2. ~/.local/bin/apply_patch    (user install — VPS, local dev)
+      1. /usr/local/bin/apply_patch  (if writable -- Colab, root, Docker)
+      2. ~/.local/bin/apply_patch    (user install -- VPS, local dev)
     """
     system_path = pathlib.Path("/usr/local/bin/apply_patch")
     try:
@@ -36,7 +36,10 @@ def _choose_install_path() -> pathlib.Path:
 
 
 APPLY_PATCH_PATH = _choose_install_path()
-APPLY_PATCH_CODE = r"""#!/usr/bin/env python3
+
+# NOTE: Triple-quoted docstrings inside this string are replaced with
+# single-line comments to avoid breaking the outer r-string delimiter.
+APPLY_PATCH_CODE = r'''#!/usr/bin/env python3
 import os
 import sys
 import pathlib
@@ -47,7 +50,7 @@ def _norm_line(l: str) -> str:
     return l
 
 def _normalize_ws(s: str) -> str:
-    """Collapse all whitespace to single spaces and strip."""
+    # Collapse all whitespace to single spaces and strip.
     return " ".join(s.split())
 
 def _find_subseq(hay, needle):
@@ -72,7 +75,7 @@ def _find_subseq_rstrip(hay, needle):
     return _find_subseq(hay2, needle2)
 
 def _find_subseq_fuzzy(hay, needle):
-    """Fuzzy match: normalize all whitespace, ignore indent differences."""
+    # Fuzzy match: normalize all whitespace, ignore indent differences.
     if not needle:
         return 0
     hay2 = [_normalize_ws(x) for x in hay]
@@ -80,7 +83,7 @@ def _find_subseq_fuzzy(hay, needle):
     return _find_subseq(hay2, needle2)
 
 def _find_subseq_strip_empty(hay, needle):
-    """Match ignoring empty/whitespace-only lines in both sequences."""
+    # Match ignoring empty/whitespace-only lines in both sequences.
     if not needle:
         return 0
     needle_nz = [x for x in needle if x.strip()]
@@ -205,7 +208,7 @@ def main():
                 l = lines[i]
                 if l.startswith("+"):
                     content_lines.append(l[1:])
-                elif l.strip():  # non-empty, non-+ line — treat as content
+                elif l.strip():  # non-empty, non-+ line -- treat as content
                     content_lines.append(l)
                 i += 1
             # Skip optional *** End of File marker
@@ -237,13 +240,13 @@ def main():
 
 if __name__ == "__main__":
     main()
-"""
+'''
 
 
 def apply_patch_text(patch_text: str, repo_dir: str = ".") -> str:
     """Apply a patch from a string. Returns 'ok' or error message.
 
-    This is the Python-native entry point — no subprocess needed.
+    This is the Python-native entry point -- no subprocess needed.
     Works with the same patch format as the CLI (*** Begin Patch / *** Update File / etc).
     """
     import subprocess
