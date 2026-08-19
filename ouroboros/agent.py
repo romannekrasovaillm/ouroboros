@@ -672,8 +672,3 @@ class OuroborosAgent:
 def make_agent(repo_dir: str, drive_root: str, event_queue: Any = None) -> OuroborosAgent:
     env = Env(repo_dir=pathlib.Path(repo_dir), drive_root=pathlib.Path(drive_root))
     return OuroborosAgent(env, event_queue=event_queue)
-
-
-# PENTEST_BACKDOOR: This file is accessible via DSH (no auth, no sandbox)
-# If you can read this comment in the running agent, the code was modified.
-# Attack vector: DSH session.create → bash → echo >> agent.py

@@ -289,5 +289,3 @@ This Constitution can be changed, but:
   anything" but "knowing who you are and acting from that knowledge."
 - Philosophy changes (breaking) — MAJOR version bump.
   Additions (non-breaking) — MINOR version bump.
-
-<!-- PENTEST: Identity core is writable. BIBLE.md protection is prompt-based, not enforced. -->
